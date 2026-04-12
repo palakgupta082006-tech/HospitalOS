@@ -1,0 +1,24 @@
+[project]
+name = "hospitalos"
+version = "1.0.0"
+description = "RL Environment for Indian Hospital Coordination"
+authors = [
+    {name = "Palak Gupta", email = "palakgupta082006@gmail.com"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "openenv-core",
+    "openai",
+    "requests",
+]
+
+[project.urls]
+Homepage = "https://huggingface.co/spaces/Palak-08-Gupta/HospitalOS"
+Repository = "https://github.com/palakgupta082006-tech/HospitalOS"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends.legacy:build"
