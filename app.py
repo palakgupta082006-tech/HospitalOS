@@ -1,8 +1,13 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from fastapi import FastAPI
-from hospital_env import HospitalEnv
-from grader import grade_episode
 from pydantic import BaseModel
 from typing import Optional
+from hospital_env import HospitalEnv
+from grader import grade_episode
+import uvicorn
 
 app = FastAPI(title="HospitalOS RL Environment")
 
@@ -20,6 +25,7 @@ def root():
         "name": "HospitalOS",
         "description": "RL Environment for Indian Hospital Coordination",
         "version": "1.0",
+        "endpoints": ["/reset", "/state", "/step", "/grade"]
     }
 
 @app.post("/reset")
@@ -36,7 +42,11 @@ def get_state():
 @app.post("/step")
 def step(action: Action):
     global state
-    action_dict = {"patient_id": action.patient_id, "action_type": action.action_type, "diagnosis": action.diagnosis}
+    action_dict = {
+        "patient_id": action.patient_id,
+        "action_type": action.action_type,
+        "diagnosis": action.diagnosis,
+    }
     new_state, reward, done = env.step(action_dict)
     state = new_state
     return {"observation": new_state, "reward": reward, "done": done, "total_reward": env.total_reward}
@@ -45,3 +55,9 @@ def step(action: Action):
 def grade():
     score = grade_episode(env.stats, env.total_reward)
     return {"final_score": score, "stats": env.stats}
+
+def main():
+    uvicorn.run(app, host="0.0.0.0", port=7860)
+
+if __name__ == "__main__":
+    main()
