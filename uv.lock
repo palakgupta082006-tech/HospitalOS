@@ -1,0 +1,12 @@
+version = 1
+requires-python = ">=3.10"
+
+[manifest]
+requirements = [
+    { name = "fastapi" },
+    { name = "uvicorn" },
+    { name = "pydantic" },
+    { name = "openenv-core" },
+    { name = "openai" },
+    { name = "requests" },
+]
