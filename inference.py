@@ -12,79 +12,7 @@ DIAGNOSES = [
     "pneumonia", "stroke", "dengue", "typhoid"
 ]
 
-def call_llm(prompt: str) -> str:
-    """Call LLM using OpenAI-compatible API to decide action."""
-    try:
-        import openai
-        client = openai.OpenAI(
-            base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            api_key=os.environ.get("OPENAI_API_KEY", "sk-placeholder"),
-        )
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=100,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception:
-        # fallback to rule-based if LLM unavailable
-        return "diagnose"
-
-def get_action_from_llm(state: dict) -> dict:
-    """Use LLM to decide best action given current hospital state."""
-    patients = state.get("patients", [])
-    resources = state.get("resources", {})
-
-    if not patients:
-        return {"patient_id": -1, "action_type": "wait", "diagnosis": None}
-
-    # build prompt for LLM
-    patient = patients[0]
-    symptoms = patient.get("symptoms", [])
-    severity = patient.get("severity", "stable")
-    diagnosed = patient.get("diagnosed", False)
-    treated = patient.get("treated", False)
-
-    prompt = f"""You are a hospital coordinator AI.
-Patient severity: {severity}
-Symptoms: {symptoms}
-Diagnosed: {diagnosed}
-Treated: {treated}
-Resources: beds={resources.get('beds')}, icu={resources.get('icu_slots')}, medicines={resources.get('medicines')}
-
-Choose ONE action from: diagnose, treat, assign_bed, assign_icu, update_family, audit_bill, discharge
-If action is diagnose, also choose diagnosis from: {DIAGNOSES}
-
-Reply in JSON format only:
-{{"action_type": "diagnose", "diagnosis": "cardiac_arrest"}}
-"""
-
-    llm_response = call_llm(prompt)
-
-    try:
-        parsed = json.loads(llm_response)
-        action_type = parsed.get("action_type", "diagnose")
-        diagnosis = parsed.get("diagnosis", None)
-    except Exception:
-        # fallback
-        if not diagnosed:
-            action_type = "diagnose"
-            diagnosis = _guess_diagnosis(symptoms)
-        elif not treated:
-            action_type = "treat"
-            diagnosis = None
-        else:
-            action_type = "discharge"
-            diagnosis = None
-
-    return {
-        "patient_id": patient["id"],
-        "action_type": action_type,
-        "diagnosis": diagnosis,
-    }
-
 def _guess_diagnosis(symptoms: list) -> str:
-    """Rule-based fallback diagnosis."""
     symptom_map = {
         "cardiac_arrest": ["chest pain", "breathlessness", "sweating", "arm pain"],
         "stroke": ["facial drooping", "arm weakness", "speech difficulty", "confusion"],
@@ -103,68 +31,151 @@ def _guess_diagnosis(symptoms: list) -> str:
             best_match = diagnosis
     return best_match
 
-def run_inference():
-    """Run full episode with LLM agent and structured logging."""
+def get_action(state: dict) -> dict:
+    patients = state.get("patients", [])
 
-    # START log
+    if not patients:
+        return {"patient_id": -1, "action_type": "wait", "diagnosis": None}
+
+    # find critical undiagnosed first
+    for p in patients:
+        if p["severity"] == "critical" and not p["diagnosed"]:
+            return {
+                "patient_id": p["id"],
+                "action_type": "diagnose",
+                "diagnosis": _guess_diagnosis(p["symptoms"])
+            }
+
+    # find critical diagnosed not in icu
+    for p in patients:
+        if p["severity"] == "critical" and p["diagnosed"] and not p["in_icu"]:
+            return {
+                "patient_id": p["id"],
+                "action_type": "assign_icu",
+                "diagnosis": None
+            }
+
+    # treat diagnosed untreated
+    for p in patients:
+        if p["diagnosed"] and not p["treated"]:
+            return {
+                "patient_id": p["id"],
+                "action_type": "treat",
+                "diagnosis": None
+            }
+
+    # discharge treated
+    for p in patients:
+        if p["treated"] and p["diagnosed"]:
+            return {
+                "patient_id": p["id"],
+                "action_type": "discharge",
+                "diagnosis": None
+            }
+
+    # diagnose remaining
+    for p in patients:
+        if not p["diagnosed"]:
+            return {
+                "patient_id": p["id"],
+                "action_type": "diagnose",
+                "diagnosis": _guess_diagnosis(p["symptoms"])
+            }
+
+    # update family
+    for p in patients:
+        if not p["family_updated"]:
+            return {
+                "patient_id": p["id"],
+                "action_type": "update_family",
+                "diagnosis": None
+            }
+
+    # audit bill
+    return {
+        "patient_id": patients[0]["id"],
+        "action_type": "audit_bill",
+        "diagnosis": None
+    }
+
+def main():
+    # START log — required structured format
     print(json.dumps({
         "type": "START",
         "env": "HospitalOS",
         "model": MODEL_NAME,
         "api_base": API_BASE_URL,
-    }))
+    }), flush=True)
 
-    # reset environment
-    reset_response = requests.post(f"{API_BASE_URL}/reset")
-    state = reset_response.json().get("observation", {})
+    try:
+        # reset environment
+        reset_response = requests.post(f"{API_BASE_URL}/reset", timeout=30)
+        state = reset_response.json().get("observation", {})
+    except Exception as e:
+        print(json.dumps({"type": "ERROR", "message": str(e)}), flush=True)
+        return
+
     total_reward = 0
     step = 0
-
     done = False
+
     while not done:
         step += 1
 
-        # get action from LLM
-        action = get_action_from_llm(state)
+        # get action
+        action = get_action(state)
 
-        # take step in environment
-        step_response = requests.post(
-            f"{API_BASE_URL}/step",
-            json=action,
-            headers={"Content-Type": "application/json"}
-        )
-        result = step_response.json()
+        try:
+            # take step
+            step_response = requests.post(
+                f"{API_BASE_URL}/step",
+                json=action,
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+            result = step_response.json()
+        except Exception as e:
+            print(json.dumps({"type": "ERROR", "step": step, "message": str(e)}), flush=True)
+            break
 
         state = result.get("observation", {})
         reward = result.get("reward", 0)
         done = result.get("done", False)
         total_reward = result.get("total_reward", 0)
 
-        # STEP log — structured format
+        # STEP log — required structured format
         print(json.dumps({
             "type": "STEP",
             "step": step,
-            "action": action,
+            "action_type": action["action_type"],
+            "patient_id": action["patient_id"],
+            "diagnosis": action.get("diagnosis"),
             "reward": reward,
             "total_reward": total_reward,
             "done": done,
-        }))
+        }), flush=True)
 
         if step >= 50:
             break
 
     # get final grade
-    grade_response = requests.get(f"{API_BASE_URL}/grade")
-    grade = grade_response.json()
+    try:
+        grade_response = requests.get(f"{API_BASE_URL}/grade", timeout=30)
+        grade = grade_response.json()
+        final_score = grade.get("final_score", 0)
+        stats = grade.get("stats", {})
+    except Exception:
+        final_score = 0
+        stats = {}
 
-    # END log
+    # END log — required structured format
     print(json.dumps({
         "type": "END",
         "total_steps": step,
         "total_reward": total_reward,
-        "final_score": grade.get("final_score", 0),
-        "stats": grade.get("stats", {}),
-    }))
+        "final_score": final_score,
+        "stats": stats,
+    }), flush=True)
 
 if __name__ == "__main__":
-    run_inference()
+    main()
